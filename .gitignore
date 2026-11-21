@@ -23,3 +23,10 @@ artifacts/
 Thumbs.db
 .vscode/
 .idea/
+
+# LaTeX build files
+*.aux
+*.log
+*.synctex.gz
+*.fdb_latexmk
+*.fls
