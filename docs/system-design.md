@@ -196,13 +196,19 @@ All tools are harness code with explicit permissions per role.
 - **query-ledger:** structured queries over experiments.
 - **search-literature / fetch-source:** see §7.8.
 - **view-images / inspect-predictions:** render samples, worst-k predictions, and per-class grids as images for multimodal models.
-- **kaggle-cli:** leaderboard reads and submissions. Only the Submit stage holds this permission.
+- **kaggle-cli:** leaderboard reads and submissions. Agents never hold this permission. The harness submits on its own, at Baseline (the first CV/leaderboard point) and at Submit, according to the submission policy.
 
 ### 7.5 Workspace and solution skeleton
 
 - Each competition run gets a git repo with a standard skeleton: data module, model, train loop, inference/TTA, and config. Agents work by diff, and every ledger run points at a commit.
 - Separate skeletons exist per task family. v1 covers classification/regression. Detection and segmentation come in phase 3.
 - Labels, fold assignments, and the metric live in a **read-only area** that the training code consumes but agents cannot edit. This enforces principle 1.
+- **The harness owns the fold loop.** *(My call. It closes a leak that Reviewer checks alone can't.)* Agent-written code provides only two entry points: *train on these samples* and *predict on these samples*.
+  - For each fold, the harness mounts only that fold's training labels and calls train.
+  - It then calls predict on the held-out images with no labels present, and scores the OOF predictions itself.
+  - Training code therefore can never see validation labels, even indirectly.
+  - Stacking and blending run harness-side on OOF predictions.
+  - Pseudo-labelling runs on test or unlabelled images through the same predict entry point.
 
 ### 7.6 Experiment ledger
 
@@ -267,7 +273,10 @@ Papers with Code was shut down in 2025 and is not a source.
 **Behaviour.**
 - Research runs up front and is re-entered on a plateau or a pivot.
 - Cards are claims to test, never facts. A card's evidence trail feeds the final report.
-- Kaggle discussion access through the API is limited. The builder must check Kaggle's terms before any scraping.
+- **Past Kaggle solutions come from Meta Kaggle**, Kaggle's official public dataset of competitions, forum topics, and messages. It is refreshed regularly and needs no scraping. *(My call.)*
+  - A small curated index of known winning write-ups ships with the tool.
+  - Users can add links.
+  - Anything beyond these sources requires a Kaggle terms-of-service review first.
 
 ### 7.9 HITL
 
@@ -330,6 +339,10 @@ The Python orchestrator, the evaluation code, and the self-improvement procedure
    - Adopt, merge, or discard based on **measured outcomes**: best CV per GPU-hour, failure rate, tokens per useful experiment.
    - This differs from Harness², which judges by behavioural contrast because its tasks lack ground truth. Kaggle has a metric, so we use it.
    - Every adoption writes an evidence record.
+   - **Two kinds of probe.** *(My call.)*
+     - *Execution edits* (Coder, Debugger, Reviewer, Analyst, tool guidance) don't change which ideas get tried. They are probed on the same next ideas, seeds, and rung budget.
+     - *Strategy edits* (Strategist, Researcher, stage plan, scheduler) change what gets tried, so a matched slice is meaningless for them. They are compared end to end under a fixed budget, which only makes sense across competitions.
+     - In v1, loop 1 may propose execution edits only. Strategy edits are queued for loop 2.
 5. **Budget:** probing is capped at a share of compute. The default share is the builder's call, with something like 10–15% as a starting point.
 
 **Loop 2, across competitions (phase 2).** This is the memory layer, designed against the polluted-memory anti-goal.
