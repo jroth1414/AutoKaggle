@@ -3,17 +3,18 @@
 | | |
 |---|---|
 | **Document** | System design specification |
-| **Version** | 0.2 (draft for review) |
+| **Version** | 0.3 (draft for review) |
 | **Date** | 2026-11-20 |
 | **Owner** | John Roth |
 | **Status** | In review. Not yet approved for implementation. |
-| **Companion docs** | [challenge-candidates.md](challenge-candidates.md) · [figures/architecture.tex](figures/architecture.tex) |
+| **Companion docs** | [challenge-candidates.md](challenge-candidates.md) · [figures/architecture.tex](figures/architecture.tex) · [figures/search-loops.tex](figures/search-loops.tex) |
 
 ### Revision history
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-11-20 | First draft: architecture, components, roadmap |
 | 0.2 | 2026-11-20 | Full rewrite: requirements, interfaces, lifecycle, threat model, v1 milestones and acceptance criteria, development challenge, TikZ architecture figure |
+| 0.3 | 2026-11-20 | New §8.8 specifying the wide (explore) and narrow (exploit) loops, the knob boundary, graduation and saturation, the scheduler, and handoffs. Figure 2 added. Compute layer split out (§8.7). |
 
 ---
 
@@ -63,9 +64,10 @@ AutoKaggle is an open-source agent harness for Kaggle computer-vision competitio
   - It runs each cross-validation fold itself, so agent code never sees validation labels.
   - It computes every score.
   - It trusts local CV over the public leaderboard.
-- Two kinds of search share the GPU:
-  - **Explore** searches broadly across solution families seeded from the literature and past Kaggle winners.
-  - **Exploit** tunes hard in the style of AutoResearch.
+- Two search loops share the GPU (§8.8, Figure 2):
+  - The **wide loop** (explore) searches across structurally different solution families, seeded from the literature, past Kaggle winners and error analysis.
+  - The **narrow loop** (exploit) tunes a graduated family hard, in the style of AutoResearch plus classic hyperparameter optimization.
+  - A bandit scheduler splits GPU time between the loops.
   - A fidelity ladder keeps most experiments cheap, which is how the system adapts to whatever compute it runs on.
 
 **Priority order:** (1) the most performant solution, (2) insightful research, (3) a useful tool. When they conflict, the higher priority wins.
@@ -83,8 +85,8 @@ AutoKaggle is an open-source agent harness for Kaggle computer-vision competitio
 
 | System | What it is | What AutoKaggle takes | What AutoKaggle avoids |
 |---|---|---|---|
-| **AutoResearch** (Karpathy) | One agent edits a training script and keeps changes that improve a fixed-budget metric | The exploit loop: one change per run, a fixed time budget, keep only if better | One-file, one-metric scope with no validation design |
-| **AIDE** (Weco) | Tree search over candidate ML solutions | Explore as a tree of solution families with ledger lineage | Greedy optimization on a single validation number |
+| **AutoResearch** (Karpathy) | One agent edits a training script and keeps changes that improve a fixed-budget metric | The narrow loop (exploit): one change per run, a fixed time budget, keep only if better | One-file, one-metric scope with no validation design |
+| **AIDE** (Weco) | Tree search over candidate ML solutions | The wide loop (explore): a tree of solution families with ledger lineage | Greedy optimization on a single validation number |
 | **AutoResearchClaw** | 23-stage research pipeline with configurable and dynamic HITL, literature search and REFINE/PIVOT | A staged pipeline, gate modes, event-driven pauses, PIVOT/REFINE transitions, citation verification | Paper-writing as the end product, and a stage count beyond what Kaggle needs |
 | **Harness²** (Google Research) | Recursive improvement of an agent's harness (prompts, skills, memory, tools, scripts) with frozen weights. One loop inside a task, one across tasks. | Harness-as-files, Propose → Probe → Compose, the split between invariant and domain edits, lessons gated by evidence | Accepting edits on behavioural contrast alone. Its paper reports regressions and no held-out validation. Kaggle's ground-truth metric lets AutoKaggle do better. |
 | **MLE-bench** (OpenAI) | 75 past Kaggle competitions with local grading and medal thresholds | The yardstick for the harness itself, and the held-out gate for promoting cross-competition lessons | Using it as the only measure. Live competitions remain the real test. |
@@ -114,7 +116,7 @@ Each of these counts as failure even if the software works:
 
 | ID | Anti-goal | Primary defence |
 |---|---|---|
-| AG1 | **Leaderboard overfitting**: public LB climbs while the private score falls | CV is the objective. The public LB is only a correlation signal. Submission policy (§8.11). |
+| AG1 | **Leaderboard overfitting**: public LB climbs while the private score falls | CV is the objective. The public LB is only a correlation signal. Submission policy (§8.12). |
 | AG2 | **Reward hacking**: score gains from touching labels, the metric, folds or test data | Harness-owned fold loop, read-only evaluation area, harness-computed scores (§14) |
 | AG3 | **Rule violations**: multiple accounts, private sharing, disallowed data or weights, LB probing | The harness has no capability for these. Reviewer compliance checks. |
 | AG4 | **Opaque wins**: scores nobody can explain or reproduce | Ledger, reproducibility bundle, research report |
@@ -140,8 +142,9 @@ Phase tags: **v1**, **P2**, **P3**, **P4** (see §20).
 | FR-07 | Record every experiment in a ledger: lineage, config, commit, per-fold scores, OOF and test predictions, costs | v1 |
 | FR-08 | Profile hardware and size jobs to fit (fit table) | v1 |
 | FR-09 | Run a fidelity ladder (R0–R3) with promotion between rungs | v1 |
-| FR-10 | Exploit loop: fixed-budget, one-change, keep-if-better tuning of the current leader | v1 |
-| FR-11 | Explore loop: tree search over solution families seeded by idea cards | v1 |
+| FR-10 | Narrow loop (exploit): fixed-budget trials on a graduated family's declared knobs (agent one-change proposals, optimizer trials, post-processing sweeps on cached OOF), keep-if-better beyond noise, R3 confirmation | v1 |
+| FR-11 | Wide loop (explore): tree search over structurally distinct solution families seeded by idea cards, Analyst findings and recombination; screening R0→R2; graduation and pruning | v1 |
+| FR-11a | Bandit scheduler allocating GPU time across the wide loop and each narrow-loop family, with a wide floor, an ensemble reserve and a time-phase prior | v1 |
 | FR-12 | Research engine: search arXiv, Semantic Scholar, GitHub and Meta Kaggle, and produce idea cards with evidence | v1 |
 | FR-13 | Research sources: CVF Open Access, OpenReview, Hugging Face Hub | P2 |
 | FR-14 | Ensemble OOF predictions (blending or stacking) and select TTA | v1 |
@@ -275,13 +278,13 @@ Built on LangGraph with a persistent checkpointer.
 | **Validate** | CV design (grouped/stratified k-fold). Leakage checks: duplicates across folds, shared groups, train/test overlap. Metric verification. Fold-stability test with a cheap model. | Frozen folds, verified metric, acceptable fold variance | **always** |
 | **Research** | Idea cards from the literature and past competitions. Re-entered on a plateau or PIVOT. | Ranked idea backlog | off |
 | **Baseline** | Strong standard pipeline end to end, a valid submission file, a first submission | Baseline in the ledger, first CV/LB point | on-event |
-| **Explore ⇄ Exploit** | Main search loop (§8.7) | Budget exhausted, plateau, or human stop | on-event |
+| **Wide ⇄ Narrow** | Search: the wide loop (explore) and the narrow loop (exploit) under the scheduler (§8.8) | Budget exhausted, plateau, or human stop | on-event |
 | **Ensemble** | OOF blending or stacking, TTA selection, runtime check | Ensemble beats the best single model, or is rejected | on-event |
 | **Submit** | Spend remaining submissions per policy. Select two finals. | Finals selected | **always** |
 | **Write-up** | Research report, solution write-up, reproducibility bundle | Reports generated | off |
 
 **Transitions**
-- The Strategist may request **REFINE** (stay in the current family, change tactics) or **PIVOT** (return to Research or Explore with a new direction).
+- The Strategist may request **REFINE** (stay in the current family, change tactics) or **PIVOT** (return to Research or the wide loop with a new direction).
 - The stage machine allows or refuses each request based on budget, gate policy and recent progress.
 - Every transition is a Decision record (§10).
 
@@ -332,7 +335,7 @@ Each role is a prompt, skills, an allowed tool set, and a model assignment. All 
 | workspace/diff | Apply, revert or inspect diffs in the solution repo | Writes outside the solution workspace are refused |
 | run-job | Queue a job at a rung | Returns a job id, never a score |
 | query-ledger | Structured ledger queries | Read-only |
-| search-literature / fetch-source | Research engine (§8.8) | Rate-limited and cached |
+| search-literature / fetch-source | Research engine (§8.9) | Rate-limited and cached |
 | view-images | Render samples or grids as images | For multimodal roles |
 | inspect-predictions | Worst-k cases, per-class and per-slice breakdowns, overlays for segmentation | Reads OOF predictions plus labels *harness-side*. Agents see rendered results, not label files. |
 | read-logs / read-diff / read-rules | Read-only views | — |
@@ -366,7 +369,7 @@ Stacking and blending run harness-side. Pseudo-labelling uses `predict` on test 
 - Holds the labels, fold assignments, metric and scoring code.
 - It is outside agent-writable paths and is not mounted into training containers except as the per-fold training-label view.
 
-### 8.7 Compute layer and search
+### 8.7 Compute layer
 
 **Hardware profiler**
 - Measures GPU count, VRAM, throughput and disk.
@@ -381,20 +384,138 @@ Stacking and blending run harness-side. Pseudo-labelling uses `predict` on test 
 | R2 single-fold | Full data, target resolution, 1 fold | Confirm the promising ideas |
 | R3 full | All folds, full schedule | Ledger-grade result. OOF for ensembling. |
 
-- **Promotion:** successive halving from R1 to R2 to R3.
 - **Calibration:** the rank correlation between rungs is tracked. If R1 stops predicting R2, the harness recalibrates: bigger subsets, higher resolution or longer schedules.
 - **Sizing:** rung definitions scale with the fit table. This is the primary mechanism for adapting to compute (G2).
-
-**Two-speed search**
-- **Explore:** an AIDE-style tree of solution families. Nodes are experiments, edges are diffs, and roots are idea cards. Families include backbone families, resolution regimes, losses, instance-separation strategies, pseudo-labelling and external pretraining.
-- **Exploit:** an AutoResearch-style loop on the current leader. Each run makes one change (hyperparameters, augmentation strength, schedule, thresholds) under a fixed time budget. A change is kept only if CV improves beyond a **noise threshold**, estimated from seed and fold variance.
-- **Scheduler:** a bandit-style allocator divides GPU time between explore and exploit by recent CV gain per GPU-hour, within budgets and gate holds.
+- **Use:** the wide loop screens on R0–R2. The narrow loop runs trials at R2 and confirms at R3 (§8.8).
 
 **Runners.** All runners sit behind one interface (§11.5):
 - v1: local process and Docker with GPU.
 - P3: Modal, RunPod, Kaggle notebooks; multi-GPU.
 
-### 8.8 Research engine
+**Job queue.** The queue is prioritized by the scheduler (§8.8.5). On a single GPU, jobs run one after another. With more GPUs, or when VRAM allows (per the fit table), jobs are packed in parallel. CPU-only work runs alongside GPU jobs: post-processing sweeps on cached predictions, research, and LLM calls.
+
+### 8.8 Search: wide and narrow loops
+
+![Wide and narrow search loops](figures/search-loops.svg)
+
+*Figure 2. The wide (explore) and narrow (exploit) loops, the scheduler that splits GPU time between them, and how each uses the fidelity ladder. The source is [figures/search-loops.tex](figures/search-loops.tex).*
+
+Search is the core of the Wide ⇄ Narrow stage. Two loops share the ledger, the fidelity ladder and the GPU:
+
+| | **Wide loop** (explore) | **Narrow loop** (exploit) |
+|---|---|---|
+| Question | *Which approach should we be using?* | *How far can this approach go?* |
+| Unit of search | A **family**: a structurally distinct solution | A **knob change** inside one family |
+| Changes allowed | Structure: architecture or backbone family, input regime (resolution, tiling, crops), head or loss formulation, instance-separation strategy, training paradigm (pseudo-labels, external pretraining) | Declared knobs only: learning rate and schedule, augmentation strengths, regularization, epochs, loss weights, post-processing thresholds, TTA views |
+| Inspired by | AIDE (tree search over solutions) | AutoResearch (fixed-budget, keep-if-better) plus classic HPO |
+| Ladder use | R0 smoke → R1 screen → R2 confirm | R2 fixed-budget trials, R3 confirmations |
+| Output | Graduated families | A tuned incumbent per family; saturated families with R3 OOF for the ensemble |
+
+#### 8.8.1 Families and the knob boundary
+- A **family** is a node in the wide tree. Each family has:
+  - a root experiment;
+  - a parent family (except roots seeded from idea cards);
+  - the idea card(s) behind it;
+  - a status: candidate → screening → graduated → active → saturated, or pruned;
+  - an **incumbent**, its best confirmed configuration;
+  - a declared **knob space**.
+- When the Coder creates a family, it declares the knob space: each knob's name, type and range, and where it lives in the config. The Reviewer checks that knobs are pure config: no code paths that read labels, and no structural switches disguised as knobs.
+- **The boundary rule:** the narrow loop may change only declared knobs. Any change to code or structure goes back to the wide loop as a new child family. This keeps narrow trials cheap, attributable and safe to automate, and keeps the wide tree an honest record of distinct ideas.
+
+#### 8.8.2 Wide loop (explore)
+Each cycle processes one batch of candidate families:
+1. **Gather candidates** from four sources:
+   - idea cards from the research engine;
+   - Analyst findings, e.g. "small filaments near the limb are missed" → a crop-refinement family;
+   - **recombination** of strong families, e.g. family A's backbone with family B's head;
+   - REFINE or PIVOT requests.
+2. **Rank.** The Strategist ranks candidates by **expected value per cost**: expected gain × probability of success ÷ estimated GPU cost. Each estimate comes with a stated basis (evidence in the card, similar past experiments). Batch size comes from the scheduler's wide allocation and the R1 cost from the fit table.
+3. **Implement.** The Coder writes each family as a structural diff from its parent node, and runs R0. Failures go to the Debugger, which gets a bounded number of attempts. A family that is still broken is pruned with failure class "unbuildable".
+4. **Screen.** Successive halving runs the batch at R1, then promotes the top fraction to R2. If the R1→R2 rank correlation degrades, the ladder is recalibrated (§8.7).
+5. **Decide.** Each R2 survivor either graduates or is pruned (below). Pruned families close their idea cards as rejected, with the evidence attached. A negative result is still a research result (G6).
+6. **Expand.** The tree grows from strong nodes (improve), roots for new idea cards (draft), and a bounded share of failed nodes (debug). This follows AIDE's draft / improve / debug policy, with the mix set in the harness store.
+
+**Graduation rule.** A family graduates to the narrow loop when either:
+- its R2 score is within δ of the current leader's R2 score, where δ is a multiple of the leader's noise σ; or
+- it adds **ensemble diversity**: its R2 OOF predictions correlate weakly with the existing pool, and a quick harness-side blend on R2 OOF improves CV.
+
+The diversity route matters because the final ensemble benefits from families that are individually weaker but make different errors.
+
+#### 8.8.3 Narrow loop (exploit)
+Works on one **active** family at a time per GPU slot.
+1. **Incumbent and noise.** On graduation, the incumbent is the family's best R2 configuration. The harness estimates the family's **noise σ** by re-running the incumbent with 2–3 seeds at R2, at the start and again after major changes.
+2. **Propose one change.** Three proposers share the loop:
+   - **Agent proposal** (AutoResearch style). The Coder or Strategist proposes one targeted knob change, with a rationale drawn from training curves, Analyst findings and recent trial history. Exactly one knob changes, so the trial is attributable in the research report.
+   - **Optimizer trial** (classic HPO). A sample-efficient optimizer such as TPE or Bayesian optimization proposes a joint setting of the continuous knobs. No LLM is involved, so it is cheap. It may change several knobs at once and is logged as an optimizer trial.
+   - **Post-processing sweep.** Thresholds, minimum instance area, overlap resolution and TTA choices are tuned on **cached OOF predictions** with no retraining. These run on CPU alongside GPU work and are especially valuable for segmentation and PQ-style metrics.
+
+   The scheduler interleaves the proposers. Agent proposals dominate early, when informed moves pay off most. Optimizer trials take over once agent proposals stop being accepted.
+3. **Run a fixed-budget trial.** Each trial runs at R2 under the **same wall-clock cap** as the incumbent's reference run, so comparisons are fair.
+4. **Accept or revert.**
+   - Accept only if the gain Δ > k·σ, with k in the harness store (default around 2). The change is committed and becomes the new incumbent.
+   - Otherwise the diff is reverted and the trial is recorded with its result. Rejected trials still feed the optimizer and the report.
+5. **Confirm at R3.** After every N accepted changes, and always before saturation, the incumbent runs at R3 on all folds.
+   - If R3 confirms the R2 gains, the confirmed incumbent is updated.
+   - If R3 contradicts them, the harness rolls back to the last confirmed incumbent, raises k for this family, and logs a Decision. This guards against climbing noise on a single fold.
+6. **Saturate.** A family saturates when either:
+   - no change has been accepted in M consecutive trials; or
+   - the improvement rate falls below ε CV per GPU-hour.
+
+   On saturation:
+   - the final incumbent's R3 OOF and test predictions go to the **ensemble pool**;
+   - the Analyst runs error analysis, and its findings return to the wide loop as candidates;
+   - the family is marked saturated.
+
+#### 8.8.4 Handoffs
+| From → To | Trigger | What is passed |
+|---|---|---|
+| Research → wide | Start of search; wide stall (no graduations in K batches) | New idea cards |
+| Wide → narrow | Graduation rule met | Family, R2 incumbent, knob space |
+| Narrow → wide | Saturation | Analyst findings and the saturated incumbent (as a recombination parent) |
+| Narrow → ensemble | Saturation, or an R3 confirmation of a strong incumbent | R3 OOF and test predictions |
+| Any → Strategist | REFINE or PIVOT request | Rationale. The stage machine allows or refuses it (§8.2). |
+| Search → Ensemble stage | Budget reaches the ensemble reserve; global plateau (both loops stalled and research yields nothing new); human stop | Ensemble pool |
+
+#### 8.8.5 Scheduler
+The scheduler decides what the GPU does next.
+- **Arms:** the wide loop, plus one arm for each graduated or active family in the narrow loop.
+- **Value estimate:** each arm's recent improvement in the *global* best CV (or in ensemble CV, for diversity families) per GPU-hour, with exponential discounting. A bandit policy with an exploration bonus (e.g. UCB or Thompson sampling) picks the next arm. The algorithm is the builder's choice (§24).
+- **Floors and reserves:**
+  - The wide loop keeps a **floor share**, around 20% by default, so search never collapses onto one family too early.
+  - An **ensemble reserve**, around 15% of the GPU budget, is held back for the final R3 runs and the Ensemble stage.
+  - Loop-1 self-improvement probes come out of their own capped share (§12.2).
+- **Time-phase prior:** early in the run the prior favours the wide loop. It shifts toward the narrow loop as the remaining budget shrinks. Recent gains override the prior in both directions.
+- **Overrides:**
+  - a saturation event moves the next slot to the wide loop;
+  - a wide stall triggers Research re-entry;
+  - an approved PIVOT resets the time-phase prior toward wide;
+  - a gate hold pauses the arms it affects.
+- **Decision records:** every allocation decision is logged as a Decision record, with the value estimates that drove it.
+
+#### 8.8.6 Agent roles in the loops
+| Role | Wide loop | Narrow loop |
+|---|---|---|
+| Strategist | Ranks candidates, proposes recombinations, requests PIVOT | Proposes informed knob changes; requests REFINE |
+| Coder | Writes structural diffs, declares knob spaces | Applies knob changes (config only) |
+| Debugger | Fixes R0 failures | Fixes trial failures, which are rare because changes are config only |
+| Analyst | Turns findings into candidates | Runs at saturation; reads curves to inform agent proposals |
+| Reviewer | Checks every new family before R2 | Checks knob-space declarations once per family. Config-only trials skip review. |
+
+#### 8.8.7 Ledger records
+- Every experiment records:
+  - its **loop** (wide or narrow);
+  - its **family**;
+  - its **trial kind**: structural, agent-knob, optimizer, post-processing or confirmation;
+  - its parent;
+  - its rung.
+- Families are their own ledger entity (§10.1).
+- From these records the research report can build:
+  - the wide tree, showing which approaches were tried and why they were pruned or graduated;
+  - per-family tuning curves;
+  - one-knob ablations from agent proposals;
+  - allocation history from the scheduler's decisions.
+
+### 8.9 Research engine
 
 | Source | Access | Phase |
 |---|---|---|
@@ -422,13 +543,13 @@ Notes:
 - Citations are verified to exist, i.e. the ID resolves, following AutoResearchClaw's approach.
 - Research runs up front and is re-entered on a plateau or PIVOT.
 
-### 8.9 Analyst: vision-specific error analysis
+### 8.10 Analyst: vision-specific error analysis
 
 - Renders worst-k OOF cases with predictions and ground truth overlaid, harness-side, and shows them to a multimodal model.
 - Breaks performance down by class, by metadata slice (e.g. observation site or date for Solar Filament) and by object size.
-- Produces structured findings, such as "small filaments near the limb are missed". These become idea cards or exploit targets.
+- Produces structured findings, such as "small filaments near the limb are missed". These become wide-loop candidates or inform narrow-loop proposals.
 
-### 8.10 Reviewer: pre-flight gate
+### 8.11 Reviewer: pre-flight gate
 
 Before any R2 or R3 job, the Reviewer checks the diff against a checklist loaded from the harness store:
 - leakage patterns;
@@ -438,7 +559,7 @@ Before any R2 or R3 job, the Reviewer checks the diff against a checklist loaded
 
 A Reviewer **block** stops the job. A **flag** raises an on-event HITL gate.
 
-### 8.11 Ensemble and submission policy
+### 8.12 Ensemble and submission policy
 
 **Ensemble**
 - Uses R3 experiments only.
@@ -453,7 +574,7 @@ A Reviewer **block** stops the job. A **flag** raises an on-event HITL gate.
 - Two finals are selected: one with the best CV, and one robust (diverse members, lowest fold variance).
 - P3: code competitions get a runtime check before the finals.
 
-### 8.12 Reporting
+### 8.13 Reporting
 - **Research report**
   - data insights;
   - validation design;
@@ -493,8 +614,11 @@ A walkthrough of a v1 run on the development challenge.
    - A Mask R-CNN or U-Net with connected components goes end to end through the fold loop to R3.
    - The submission file is validated (non-overlap, RLE) and submitted if late submissions are open.
    - The CV/LB point is recorded.
-6. **Explore ⇄ Exploit**
-   - The scheduler alternates between the two. Explore tries families such as Mask2Former, U-Net plus instance head, and a high-resolution refiner. Exploit tunes thresholds, minimum area, TTA views and learning rate.
+6. **Wide ⇄ Narrow**
+   - **Wide:** the first batch screens families such as Mask2Former (Swin), U-Net with an instance head, and Mask R-CNN at R1, then R2. Mask2Former graduates on score. The U-Net graduates on ensemble diversity. Mask R-CNN is pruned.
+   - **Narrow, Mask2Former:** the loop estimates σ from 3 seeds. Agent proposals adjust the learning rate and augmentation strength. Post-processing sweeps tune the mask threshold and minimum area on cached OOF with no GPU cost. An R3 confirmation after 3 accepts holds up. The family saturates after M rejected trials.
+   - **Back to wide:** at saturation the Analyst finds misses near the solar limb. That becomes a new wide candidate, a high-resolution crop-refinement child family.
+   - **Scheduler:** wide-heavy early. It shifts to narrow as Mask2Former gains, and back to wide after saturation.
    - The Analyst finds misses near the solar limb. A new idea card follows, then a crop-refinement experiment.
    - The Reviewer blocks one diff that read annotator masks inside the inference path.
 7. **Loop 1 trigger**
@@ -517,7 +641,8 @@ Crash at any point → `run` resumes from the last LangGraph checkpoint. Ledger 
 | Entity | Key fields |
 |---|---|
 | **Run** | id, competition, harness version (store hash), config, budgets, status |
-| **Experiment** | id, run, parent, idea card, commit, config, seed, rung, status, failure class |
+| **Family** | id, run, parent family, idea card(s), status (candidate, screening, graduated, active, saturated, pruned), knob space, incumbent and confirmed incumbent, noise σ, graduation or prune reason |
+| **Experiment** | id, run, family, parent, loop (wide or narrow), trial kind (structural, agent-knob, optimizer, post-processing, confirmation), idea card, commit, config, seed, rung, status, failure class |
 | **Result** | experiment, per-fold scores, mean/std, OOF path, test-prediction path, curves |
 | **Cost** | experiment or LLM call, GPU-seconds, wall time, peak VRAM, tokens, dollars, role, stage |
 | **IdeaCard** | id, claim, evidence, expected gain or cost, rule compatibility, status |
@@ -783,8 +908,8 @@ If late submissions are closed, development relies on local OOF plus the organiz
 |---|---|---|
 | **M0 Foundations** | Package layout, config, ledger, run directory, model gateway (Anthropic) with recording, turn envelope and tool protocol, permission model, budget accounting | Unit tests pass. A replayed recorded conversation produces identical tool executions. A tool call outside a role's permissions is refused. |
 | **M1 Thin vertical slice** | MLE-bench adapter. Classification skeleton. Harness-owned fold loop. Understand → Validate → Baseline → Submit with the Coder and Debugger. Local runner. | On Aerial Cactus: an unattended run produces a valid submission, the MLE-bench grade is at or above the median, and the adversarial test (planted OOF-label read) is blocked. |
-| **M2 Compute and exploit** | Hardware profiler and fit table. Rungs R0–R3 with successive halving. Docker runner. Exploit loop. Scheduler. Budgets enforced. Resume after kill. | On a T1 competition: exploit beats the M1 baseline within a fixed GPU budget. Killing the process mid-run and resuming completes the run. No budget overrun beyond one unit. |
-| **M3 Research and explore** | Research engine (arXiv, Semantic Scholar, GitHub, Meta Kaggle). Idea cards. Explore tree. Strategist, Analyst and Reviewer. REFINE/PIVOT. | Idea cards cite sources whose IDs resolve. At least one idea card drives an experiment that beats the exploit-only best on a T1 competition. The Reviewer blocks the planted leakage diff. |
+| **M2 Compute and narrow loop** | Hardware profiler and fit table. Rungs R0–R3. Docker runner. Families and knob spaces. Narrow loop (agent proposals, optimizer trials, post-processing sweeps, R3 confirmation, saturation). Scheduler with one narrow arm. Budgets enforced. Resume after kill. | On a T1 competition: the narrow loop beats the M1 baseline within a fixed GPU budget, and every accepted change exceeds k·σ. Killing the process mid-run and resuming completes the run. No budget overrun beyond one unit. |
+| **M3 Research and wide loop** | Research engine (arXiv, Semantic Scholar, GitHub, Meta Kaggle). Idea cards. Wide loop (tree, screening with successive halving, graduation by score and diversity, pruning, recombination). Full scheduler (wide floor, ensemble reserve, time-phase prior). Strategist, Analyst and Reviewer. REFINE/PIVOT. | Idea cards cite sources whose IDs resolve. At least one wide-loop family graduates and beats the narrow-only best on a T1 competition. Saturation findings produce a new wide candidate. The Reviewer blocks the planted leakage diff. |
 | **M4 Segmentation and dev challenge** | Kaggle adapter. Segmentation skeleton (semantic and instance). PQ metric with RLE I/O. Instance-level ensembling and TTA. | PQ implementation matches the organizer's reference on provided examples. A Solar Filament run with date-grouped folds reaches **OOF PQ ≥ 0.45** (strong-entry level) within 72 h on the dev box. Submission files pass format validation. |
 | **M5 HITL and reporting** | Gate policies and presets. CLI/TUI. Research report, write-up, reproducibility bundle. | Validate and Submit gates pause and resume correctly across a restart. The report regenerates from the ledger alone. The bundle retrains a final model within seed noise. |
 | **M6 Self-improvement loop 1** | Harness store. Improver. Matched probes for execution edits. HarnessEdit records. | Over repeated runs on T0/T1 competitions, adopted edits reduce failure rate or improve CV per GPU-hour versus a frozen harness, beyond noise. Every adoption has an evidence record. |
@@ -842,6 +967,7 @@ If late submissions are closed, development relies on local OOF plus the organiz
 | U11 | Literature (arXiv, GitHub, proceedings) informs experiments. Big-picture research plus focused tuning. |
 | U12 | The design covers the whole system with a phased roadmap |
 | U13 | Solar Filament Segmentation as the development challenge, plus a candidate list |
+| U14 | Search is named **wide/narrow**, with explore/exploit as the technical terms underneath |
 
 **Calls made by the author** (open to change)
 | # | Call | Reason |
@@ -857,6 +983,11 @@ If late submissions are closed, development relies on local OOF plus the organiz
 | C9 | Two finals: best-CV and robust | Hedges against private-LB shift |
 | C10 | v1 milestones M0–M6 and their thresholds | Incremental, machine-checkable, suits an autonomous builder |
 | C11 | Gate-only as the default HITL preset | Humans check the two decisions that matter most: folds and finals |
+| C12 | Knob boundary: the narrow loop changes declared config knobs only; structural changes are new wide-loop families | Keeps narrow trials cheap, attributable and safe; keeps the wide tree an honest record of ideas |
+| C13 | Graduation by score (within δ of leader) or by ensemble diversity | Strong ensembles need diverse families, not just the single best one |
+| C14 | Three narrow proposers (agent one-change, optimizer, post-processing sweeps on cached OOF) | Agents for informed moves, optimizers for cheap numeric search, zero-GPU sweeps for thresholds |
+| C15 | R3 confirmation every N accepts, with rollback | Prevents climbing single-fold noise |
+| C16 | Scheduler defaults: wide floor ~20%, ensemble reserve ~15%, time-phase prior | Avoids premature convergence and protects the endgame |
 
 ---
 
@@ -899,6 +1030,13 @@ If late submissions are closed, development relies on local OOF plus the organiz
 | **RLE** | Run-length encoding of masks |
 | **TTA** | Test-time augmentation |
 | **Rung** | A fidelity level on the ladder (R0–R3) |
+| **Wide loop (explore)** | Search across structurally distinct solution families |
+| **Narrow loop (exploit)** | Fixed-budget tuning of one family's declared knobs |
+| **Family** | A structurally distinct solution approach; a node in the wide tree |
+| **Knob space** | The config parameters a family declares as tunable by the narrow loop |
+| **Incumbent** | A family's best configuration; *confirmed* once it holds at R3 |
+| **Graduation / saturation** | A family entering the narrow loop / leaving it after a plateau |
+| **Noise σ** | Seed-to-seed spread of a family's R2 score; the bar for accepting changes is k·σ |
 | **Idea card** | Evidence-backed, testable claim produced by the research engine |
 | **Harness store** | Versioned, agent-editable harness components |
 | **Execution vs strategy edit** | A harness edit that changes how ideas are carried out vs which ideas are tried |

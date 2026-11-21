@@ -40,7 +40,7 @@
 
 % ---------------- Band A: stage machine ----------------
 \def\yA{0}
-\foreach \name [count=\i from 0] in {Understand,Validate,Research,Baseline,{Explore\\$\rightleftarrows$ Exploit},Ensemble,Submit,Write-up}{
+\foreach \name [count=\i from 0] in {Understand,Validate,Research,Baseline,{Wide $\rightleftarrows$ Narrow\\[-2pt]{\tiny\color{muted}see Fig.~2}},Ensemble,Submit,Write-up}{
   \node[chip=stageC, text width=1.18cm] (s\i) at (3.75+\i*1.5,\yA) {\name};
 }
 \foreach \i [evaluate=\i as \j using int(\i+1)] in {0,...,6}{
